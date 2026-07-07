@@ -1,0 +1,8 @@
+# 由 build.sh 编译生成的 macOS app bundle（二进制，不纳入版本控制）
+*.app/
+
+# 编译中间产物
+GoogleStatusChecker
+
+# macOS 杂项
+.DS_Store
