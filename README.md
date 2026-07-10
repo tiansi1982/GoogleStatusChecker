@@ -1,183 +1,189 @@
 # GoogleStatusChecker
 
-> macOS 状态栏小程序 · 一眼看清当前网络能否访问 Google 美国
+> A tiny macOS status-bar app that tells you, at a glance, whether your current network can reach **Google US**.
 
-GoogleStatusChecker 在 macOS 菜单栏（右上角）放一个圆形指示灯，定期检测当前网络环境下对 Google 美国（`www.google.com`）的访问情况，并用红 / 黄 / 绿三色实时反馈。适合需要判断代理 / VPN 出口地域、或排查网络连通性的场景。
+[![Platform](https://img.shields.io/badge/platform-macOS%2011%2B-success.svg)](https://www.apple.com/macos/)
+[![Architecture](https://img.shields.io/badge/arch-Apple%20Silicon%20(arm64)-blue.svg)](https://developer.apple.com/documentation/apple-silicon)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
+[![Swift](https://img.shields.io/badge/language-Swift-orange.svg)](https://swift.org/)
+[![Dependencies](https://img.shields.io/badge/dependencies-None-lightgrey.svg)](#tech-stack)
 
-## 状态灯含义
+GoogleStatusChecker puts a colored indicator light in your macOS menu bar (top-right corner). It periodically probes whether your current network can reach Google US (`www.google.com`) and reflects the result in real time with **red / yellow / green**. Handy for checking which region your proxy / VPN is exiting from, or for troubleshooting connectivity.
 
-| 颜色 | 含义 | 触发条件 |
+## Indicator meaning
+
+| Light | Meaning | Triggered when |
 | :---: | :--- | :--- |
-| 🟢 绿灯 | 可正常访问 **Google 美国** | 最终落在 `www.google.com`，页面无国家重定向，且无 `kHL`/`gl` 非 US 标识 |
-| 🟡 黄灯 | 能访问 Google，但**不是美国版本** | 被重定向到其他国家域名（如 `google.co.jp`、`google.com.hk`），或页面内有 JS/meta 跳转到其他 Google 域，或检测到非 US 国家代码 |
-| 🔴 红灯 | **无法访问** Google | 连接超时 / 出错 / 非 2xx–3xx 状态码 / 最终落地域名不是 google |
-| ⚪ 灰灯 | 检测中 | 正在发起请求，尚未拿到结果 |
+| 🟢 Green | **Google US** is reachable | Lands on `www.google.com` with no country redirect and no non-US `kHL`/`gl` marker |
+| 🟡 Yellow | Google reachable, but **not the US version** | Redirected to a country domain (e.g. `google.co.jp`, `google.com.hk`), or the page JS/meta-redirects to another Google domain, or a non-US country code is detected |
+| 🔴 Red | Google is **unreachable** | Connection timeout / error / non-2xx–3xx status / the final landing domain isn't Google |
+| ⚪ Gray | Checking | A request is in flight, no result yet |
 
-## 工作原理
+## How it works
 
-每隔 **5 分钟**自动检测一次，流程如下：
+A check runs automatically every **5 minutes**. The flow:
 
-1. 用桌面版 Chrome 的 User-Agent 请求 `https://www.google.com/`（`Accept-Language: en-US,en;q=0.9`）。
-2. 使用 **无痕会话**（`URLSessionConfiguration.ephemeral`）：不读写 Cookie、不使用缓存、`reloadIgnoringLocalCacheData`，确保每次都是真实探测。
-3. 跟随 HTTP 重定向，记录最终落地 URL。
-4. 判定逻辑：
-   - 超时 / 出错 / 状态码不在 `200..<400` / 落地域名不含 `google` → **红灯**
-   - 落地 `www.google.com` / `google.com` 时，进一步扫描页面内容：
-     - 检测 `location.replace(...)` / `location.href = ...` / `<meta refresh>` 是否指向其他 Google 域 → 命中则 **黄灯**
-     - 检测 `kHL="xx-XX"`、`gl=XX` 等国家标识 → `US` 为绿灯，其余为黄灯
-     - 都没有 → 默认 **绿灯**（视为美国版）
-   - 落地是其他 `google.*` 域名（如 `google.co.jp`）→ **黄灯**
+1. Request `https://www.google.com/` with a desktop Chrome User-Agent (`Accept-Language: en-US,en;q=0.9`).
+2. Use an **ephemeral session** (`URLSessionConfiguration.ephemeral`): no cookies, no cache, `reloadIgnoringLocalCacheData` — every probe is real.
+3. Follow HTTP redirects and record the final landing URL.
+4. Judgment logic:
+   - Timeout / error / status not in `200..<400` / landing host doesn't contain `google` → **Red**
+   - Lands on `www.google.com` / `google.com`, then scan the page content:
+     - Detect `location.replace(...)` / `location.href = ...` / `<meta refresh>` pointing to another Google domain → **Yellow**
+     - Detect `kHL="xx-XX"`, `gl=XX` country markers → `US` is green, anything else is yellow
+     - None of the above → default **Green** (treated as the US version)
+   - Lands on another `google.*` domain (e.g. `google.co.jp`) → **Yellow**
 
-这样设计是因为：很多网络环境下 `google.com` 本身能打开，但页面会在前端用 JS 把你跳到某个地区版本，单纯看 HTTP 状态码会被骗过去。本程序既看最终 URL，也看页面内的重定向和国家标识。
+The reason for looking at the page body rather than just the status code: in many networks `google.com` itself opens fine, but the page then JS-redirects you to a regional version in the front end. A naive HTTP check would be fooled. This app inspects both the final URL and the in-page redirect / country markers.
 
-## 系统要求
+## Requirements
 
-- **macOS 11.0 (Big Sur) 及以上**
-- **Apple Silicon（arm64）** —— 默认只编译 arm64；如需 Intel 支持见下文「自定义构建」
-- 从源码编译需要 Xcode Command Line Tools（`xcode-select --install`）
+- **macOS 11.0 (Big Sur) or later**
+- **Apple Silicon (arm64)** — only arm64 is built by default; for Intel support see [Custom build](#custom-build) below
+- Building from source requires Xcode Command Line Tools (`xcode-select --install`)
 
-## 快速开始
+## Quick start
 
-### 方式一：从源码编译（推荐）
+### Option A: Build from source (recommended)
 
 ```bash
-# 1. 安装命令行工具（已装可跳过）
+# 1. Install command-line tools (skip if already installed)
 xcode-select --install
 
-# 2. 进入项目目录，一键编译打包
+# 2. Enter the project directory and build in one shot
 cd GoogleStatusChecker
 ./build.sh
 
-# 3. 运行
+# 3. Run
 open GoogleStatusChecker.app
 ```
 
-编译产物 `GoogleStatusChecker.app` 会生成在当前目录。状态栏右上角会出现一个圆形指示灯。
+The build product `GoogleStatusChecker.app` is produced in the current directory. A circular indicator appears in the top-right menu bar.
 
-### 方式二：直接使用预编译的 .app
+### Option B: Use a prebuilt .app
 
-如果你拿到了别人编译好的 `GoogleStatusChecker.app`（拷贝/下载来的）：
+If you got a prebuilt `GoogleStatusChecker.app` from someone else (copied / downloaded):
 
 ```bash
-# 1. 去掉隔离属性（否则会提示"已损坏"或"无法验证开发者"）
+# 1. Remove the quarantine attribute (otherwise macOS shows "damaged" / "cannot verify developer")
 xattr -cr /path/to/GoogleStatusChecker.app
 
-# 2. 首次启动：右键 -> 打开（不要直接双击），弹窗点"打开"
-#    放行一次后，以后就能正常双击启动了
+# 2. First launch: right-click -> Open (don't double-click), then click "Open" in the dialog
+#    After allowing once, you can double-click to launch normally afterward
 open /path/to/GoogleStatusChecker.app
 ```
 
-> 因为程序使用临时签名（adhoc），没有 Apple 开发者证书公证，所以从别处拷来的版本首次会被 Gatekeeper 拦截，需要上面两步放行。在自己机器上编译则无此问题。
+> Because the app is ad-hoc signed (no Apple Developer notarization), a copy from elsewhere gets blocked by Gatekeeper on first launch and needs the two steps above. Building it on your own machine has no such issue.
 
-## 使用说明
+## Usage
 
-程序运行后只活在状态栏，**不占用 Dock 位置**（`Info.plist` 中 `LSUIElement=true`）。
+Once running, the app lives **only in the menu bar** and takes **no Dock space** (`LSUIElement=true` in `Info.plist`).
 
-**点击状态栏的指示灯**弹出菜单：
+**Click the indicator** to open the menu:
 
-| 菜单项 | 作用 |
+| Menu item | Action |
 | :--- | :--- |
-| 状态：xxx | 当前检测结果（仅显示，不可点） |
-| 上次检测：HH:mm:ss | 最近一次检测的时间 |
-| 立即重新检测（⌘R） | 马上再测一次，不必等定时器 |
-| 在浏览器中打开 Google（⌘O） | 用默认浏览器打开 `https://www.google.com/` |
-| 退出 GoogleStatusChecker（⌘Q） | 退出程序 |
+| Status: xxx | Current check result (display only, not clickable) |
+| Last check: HH:mm:ss | Time of the most recent check |
+| Recheck now (⌘R) | Run a check immediately, no need to wait for the timer |
+| Open Google in browser (⌘O) | Open `https://www.google.com/` in the default browser |
+| Quit GoogleStatusChecker (⌘Q) | Quit the app |
 
-把鼠标悬停在指示灯上，还会显示当前状态的文字提示（tooltip）。
+Hovering the indicator also shows a text tooltip with the current status.
 
-### 开机自启动
+### Launch at login
 
-把 `GoogleStatusChecker.app` 拖到 **系统设置 → 通用 → 登录项与扩展 → 登录项**（macOS Ventura 及以上），或在「登录项」里点 `+` 添加即可。
+Drag `GoogleStatusChecker.app` into **System Settings → General → Login Items & Extensions → Login Items** (macOS Ventura and later), or click `+` in "Login Items" to add it.
 
-## 分发到其他 Mac
+## Sharing with other Macs
 
-本程序是 arm64 单架构，可在任意 Apple Silicon Mac 上使用。分发方式：
+This app is single-architecture arm64 and runs on any Apple Silicon Mac. To share:
 
 ```bash
-# 打包
+# Package
 zip -r -X GoogleStatusChecker.zip GoogleStatusChecker.app
 ```
 
-把 zip 拷到目标 Mac 解压后，执行：
+On the target Mac, after unzipping:
 
 ```bash
 xattr -cr /path/to/GoogleStatusChecker.app
-open /path/to/GoogleStatusChecker.app   # 首次右键->打开
+open /path/to/GoogleStatusChecker.app   # first launch: right-click -> Open
 ```
 
-## 自定义构建
+## Custom build
 
-`build.sh` 支持环境变量调整：
+`build.sh` supports environment variables:
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | :--- | :--- | :--- |
-| `ARCHS` | `arm64` | 目标架构。设为 `"arm64 x86_64"` 可编译 universal 二进制（同时支持 Intel Mac） |
-| `MIN_OS` | `11.0` | 最低支持系统版本 |
+| `ARCHS` | `arm64` | Target architecture. Set to `"arm64 x86_64"` to build a universal binary (also supports Intel Macs) |
+| `MIN_OS` | `11.0` | Minimum supported OS version |
 
-示例：
+Examples:
 
 ```bash
-# 编译 universal（Intel + Apple Silicon 通吃）
-ARCH="arm64 x86_64" ./build.sh
+# Build universal (Intel + Apple Silicon)
+ARCHS="arm64 x86_64" ./build.sh
 
-# 提高最低系统要求到 macOS 13
+# Raise the minimum OS requirement to macOS 13
 MIN_OS=13.0 ./build.sh
 ```
 
-### 修改检测频率
+### Change the check interval
 
-检测间隔硬编码在 `main.swift` 中：
+The interval is hard-coded in `main.swift`:
 
 ```swift
-private static let checkInterval: TimeInterval = 300 // 5 分钟自动检测一次
+private static let checkInterval: TimeInterval = 300 // auto-check every 5 minutes
 ```
 
-改成你想要的秒数后重新 `./build.sh` 即可。
+Change it to your desired number of seconds, then re-run `./build.sh`.
 
-## 项目结构
+## Project structure
 
 ```
 GoogleStatusChecker/
-├── main.swift       # 全部源码（约 400 行，纯 Swift + AppKit，无第三方依赖）
-├── Info.plist       # 应用配置（LSUIElement=true 隐藏 Dock 图标）
-├── build.sh         # 一键编译打包脚本
-└── README.md        # 本文档
+├── main.swift       # All source (~400 lines, pure Swift + AppKit, no third-party deps)
+├── Info.plist       # App config (LSUIElement=true hides the Dock icon)
+├── build.sh         # One-shot build & package script
+└── README.md        # This document
 ```
 
-## 调试
+## Debugging
 
-查看运行时日志（`print` 输出会进系统日志）：
+View runtime logs (`print` output goes to the system log):
 
 ```bash
 open GoogleStatusChecker.app && \
 log stream --predicate 'process == "GoogleStatusChecker"' --style compact
 ```
 
-黄灯 / 红灯路径会打印检测到的重定向目标或国家代码，便于排查。
+Yellow / red paths print the detected redirect target or country code, which helps with troubleshooting.
 
-## 常见问题
+## FAQ
 
-**Q: 双击 .app 提示「已损坏」或「无法验证开发者」？**
-A: 程序用的是临时签名（adhoc），未做 Apple 公证。终端执行 `xattr -cr /path/to/GoogleStatusChecker.app` 去掉隔离属性，然后右键 → 打开首次放行即可。
+**Q: Double-clicking the .app shows "damaged" or "cannot verify developer"?**
+A: The app uses ad-hoc signing (no Apple notarization). Run `xattr -cr /path/to/GoogleStatusChecker.app` in Terminal to strip the quarantine attribute, then right-click → Open to allow it once.
 
-**Q: 明明能打开 Google，为什么显示黄灯？**
-A: 你的网络出口虽然能到 Google，但被 Google 重定向到了非美国版本（比如 `google.co.jp`、`google.com.hk`）。黄灯正是为了提示这种情况——「能上 Google，但不是美国 Google」。检查你的代理/VPN 出口节点地区。
+**Q: I can open Google fine, so why is it yellow?**
+A: Your network can reach Google, but Google redirected you to a non-US version (e.g. `google.co.jp`, `google.com.hk`). The yellow light is exactly to flag this — "Google works, but not US Google." Check your proxy/VPN exit region.
 
-**Q: 一直显示红灯，但浏览器能打开 Google？**
-A: 程序用无痕会话、禁缓存探测，比浏览器更严格。可能是浏览器用了本地 DNS 缓存或 Cookie。先点「立即重新检测」确认；若仍红灯，用 `log stream` 查看具体原因（超时 / 状态码 / 非 google 域名）。
+**Q: It's stuck on red, but my browser opens Google?**
+A: The app probes with an ephemeral, cache-disabled session, which is stricter than the browser (that may use local DNS cache or cookies). Click "Recheck now" first; if still red, use `log stream` to see the reason (timeout / status code / non-google domain).
 
-**Q: 会在后台偷跑流量吗？**
-A: 不会。程序每 5 分钟只请求一次 `https://www.google.com/`，无任何上传、无 Cookie、无缓存、无遥测。源码就一个文件，可自行审查。
+**Q: Does it sneak traffic in the background?**
+A: No. The app requests `https://www.google.com/` exactly once every 5 minutes — no uploads, no cookies, no cache, no telemetry. It's a single source file, so you can audit it yourself.
 
-**Q: 如何完全卸载？**
-A: 在菜单里点「退出 GoogleStatusChecker」，然后删除 `GoogleStatusChecker.app` 即可。程序不写任何配置文件、不存任何数据，删完即净。
+**Q: How do I fully uninstall?**
+A: Click "Quit GoogleStatusChecker" in the menu, then delete `GoogleStatusChecker.app`. The app writes no config files and stores no data — delete and it's gone.
 
-## 技术栈
+## Tech stack
 
-- 语言：Swift
-- 框架：Cocoa / AppKit / URLSession
-- 依赖：无第三方依赖，仅用系统框架
-- 构建：`swiftc` + `lipo` + `codesign`，无需 Xcode 工程
+- Language: Swift
+- Frameworks: Cocoa / AppKit / URLSession
+- Dependencies: none — system frameworks only
+- Build: `swiftc` + `lipo` + `codesign`, no Xcode project needed
 
 ## License
 
