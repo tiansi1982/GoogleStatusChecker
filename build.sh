@@ -19,6 +19,11 @@ if [[ ! "$MIN_OS" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     exit 1
 fi
 
+if [[ ! -f AppIcon.icns ]]; then
+    echo "!! 缺少 AppIcon.icns，请先运行 ./make-icon.sh"
+    exit 1
+fi
+
 cleanup() {
     rm -rf "$BUILD_DIR"
 }
@@ -58,6 +63,7 @@ else
 fi
 
 cp Info.plist "${STAGED_CONTENTS}/Info.plist"
+cp AppIcon.icns "${STAGED_RESOURCES}/AppIcon.icns"
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion ${MIN_OS}" "${STAGED_CONTENTS}/Info.plist"
 plutil -lint "${STAGED_CONTENTS}/Info.plist" >/dev/null
 
