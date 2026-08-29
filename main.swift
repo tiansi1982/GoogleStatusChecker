@@ -1,26 +1,69 @@
 import Cocoa
 
-private func createCircleImage(color: NSColor) -> NSImage {
+private func statusColor(for state: CheckState) -> NSColor {
+    switch state {
+    case .green: return .systemGreen
+    case .yellow: return .systemYellow
+    case .red: return .systemRed
+    case .unknown: return .systemBlue
+    case .checking: return .systemGray
+    }
+}
+
+/// Three independent, Apple-style status bars ordered Google / ChatGPT / Claude.
+/// The 14.5 pt group is nearly square and stays legible in the macOS menu bar.
+private func createServiceStatusImage(states: [CheckState]) -> NSImage {
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { rect in
-        NSColor.labelColor.withAlphaComponent(0.35).setStroke()
-        let strokeRect = rect.insetBy(dx: 3, dy: 3)
-        let outerPath = NSBezierPath(ovalIn: strokeRect)
-        outerPath.lineWidth = 1
-        outerPath.stroke()
+        let normalizedStates = (0..<3).map { index in
+            index < states.count ? states[index] : .checking
+        }
+        let barWidth: CGFloat = 4
+        let gap: CGFloat = 1.25
+        let groupWidth = barWidth * 3 + gap * 2
+        let barHeight: CGFloat = 14.5
+        let originX = rect.midX - groupWidth / 2
+        let originY = rect.midY - barHeight / 2
 
-        color.setFill()
-        let fillRect = strokeRect.insetBy(dx: 1, dy: 1)
-        NSBezierPath(ovalIn: fillRect).fill()
+        for (index, state) in normalizedStates.enumerated() {
+            let barRect = NSRect(
+                x: originX + CGFloat(index) * (barWidth + gap),
+                y: originY,
+                width: barWidth,
+                height: barHeight
+            )
+            let path = NSBezierPath(roundedRect: barRect, xRadius: 2, yRadius: 2)
+            let color = statusColor(for: state)
+            let topColor = color.blended(withFraction: 0.18, of: .white) ?? color
+            let bottomColor = color.blended(withFraction: 0.10, of: .black) ?? color
 
-        NSColor.white.withAlphaComponent(0.35).setFill()
-        let highlightRect = NSRect(
-            x: fillRect.minX + 1.5,
-            y: fillRect.midY,
-            width: fillRect.width - 3,
-            height: fillRect.height / 2.5
-        )
-        NSBezierPath(ovalIn: highlightRect).fill()
+            NSGraphicsContext.saveGraphicsState()
+            let shadow = NSShadow()
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.18)
+            shadow.shadowBlurRadius = 1
+            shadow.shadowOffset = NSSize(width: 0, height: -0.5)
+            shadow.set()
+            if let gradient = NSGradient(starting: bottomColor, ending: topColor) {
+                gradient.draw(in: path, angle: 90)
+            } else {
+                color.setFill()
+                path.fill()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+
+            NSColor.labelColor.withAlphaComponent(0.18).setStroke()
+            path.lineWidth = 0.65
+            path.stroke()
+
+            let highlightRect = NSRect(
+                x: barRect.minX + 0.65,
+                y: barRect.minY + 1.5,
+                width: 0.65,
+                height: barRect.height - 3
+            )
+            NSColor.white.withAlphaComponent(0.24).setFill()
+            NSBezierPath(roundedRect: highlightRect, xRadius: 0.32, yRadius: 0.32).fill()
+        }
         return true
     }
     image.isTemplate = false
@@ -65,7 +108,7 @@ private final class ProbeClient: @unchecked Sendable {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.httpAdditionalHeaders = [
-            "User-Agent": "GoogleStatusChecker/1.1",
+            "User-Agent": "GoogleStatusChecker/1.2",
             "Accept": "text/plain"
         ]
         session = URLSession(configuration: configuration)
@@ -100,19 +143,64 @@ private final class ProbeClient: @unchecked Sendable {
     }
 }
 
-private final class GoogleChecker: @unchecked Sendable {
+private final class MultiServiceChecker: @unchecked Sendable {
     private let client = ProbeClient()
-    private let googleProbeURL = URL(string: "https://www.google.com/generate_204")!
-    private let regionProbeURL = URL(string: "https://www.cloudflare.com/cdn-cgi/trace")!
 
-    func check(completion: @escaping @MainActor @Sendable (CheckReport) -> Void) {
+    private let googleProbeURL = URL(string: "https://www.google.com/generate_204")!
+    private let googleRegionURL = URL(string: "https://www.cloudflare.com/cdn-cgi/trace")!
+
+    private struct AIProbeSpec: Sendable {
+        let kind: ServiceKind
+        let edgeURL: URL
+        let edgeDomain: String
+        let apiURL: URL
+        let apiProbe: APIProbe
+    }
+
+    private let aiSpecs: [ServiceKind: AIProbeSpec] = [
+        .chatgpt: AIProbeSpec(
+            kind: .chatgpt,
+            edgeURL: URL(string: "https://chatgpt.com/cdn-cgi/trace")!,
+            edgeDomain: "chatgpt.com",
+            apiURL: URL(string: "https://api.openai.com/v1/models")!,
+            apiProbe: .openAI
+        ),
+        .claude: AIProbeSpec(
+            kind: .claude,
+            edgeURL: URL(string: "https://claude.ai/cdn-cgi/trace")!,
+            edgeDomain: "claude.ai",
+            apiURL: URL(string: "https://api.anthropic.com/v1/models")!,
+            apiProbe: .anthropic
+        )
+    ]
+
+    func check(
+        _ kind: ServiceKind,
+        completion: @escaping @MainActor @Sendable (ServiceReport) -> Void
+    ) {
+        switch kind {
+        case .google:
+            checkGoogle(completion: completion)
+        case .chatgpt, .claude:
+            guard let spec = aiSpecs[kind] else { return }
+            checkAI(spec: spec, completion: completion)
+        }
+    }
+
+    private func checkGoogle(
+        completion: @escaping @MainActor @Sendable (ServiceReport) -> Void
+    ) {
         client.get(googleProbeURL) { [weak self] result in
             guard let self = self else { return }
 
             switch result {
             case .failure(let error):
                 self.finish(
-                    CheckReport(state: .red, detail: "Google 连接失败：\(error.localizedDescription)"),
+                    ServiceReport(
+                        kind: .google,
+                        state: .red,
+                        detail: "Google 连接失败：\(error.localizedDescription)"
+                    ),
                     completion: completion
                 )
             case .success(let response):
@@ -127,7 +215,11 @@ private final class GoogleChecker: @unchecked Sendable {
                         detail = ProbeError.unexpectedHost(response.finalHost ?? "未知").localizedDescription
                     }
                     self.finish(
-                        CheckReport(state: .red, detail: "Google 检测失败：\(detail)"),
+                        ServiceReport(
+                            kind: .google,
+                            state: .red,
+                            detail: "Google 检测失败：\(detail)"
+                        ),
                         completion: completion
                     )
                     return
@@ -138,39 +230,110 @@ private final class GoogleChecker: @unchecked Sendable {
     }
 
     private func checkExitRegion(
-        completion: @escaping @MainActor @Sendable (CheckReport) -> Void
+        completion: @escaping @MainActor @Sendable (ServiceReport) -> Void
     ) {
-        client.get(regionProbeURL) { [weak self] result in
+        client.get(googleRegionURL) { [weak self] result in
             guard let self = self else { return }
 
-            let report: CheckReport
+            let report: ServiceReport
             switch result {
             case .failure(let error):
-                report = CheckReport(
+                report = ServiceReport(
+                    kind: .google,
                     state: .unknown,
-                    detail: "Google 可访问；出口地区估算失败：\(error.localizedDescription)"
+                    detail: "Google 可访问；Cloudflare 辅助探测失败：\(error.localizedDescription)"
                 )
             case .success(let response):
                 guard (200..<300).contains(response.statusCode),
                       let host = response.finalHost,
                       HostValidation.host(host, belongsTo: "cloudflare.com"),
                       let countryCode = ProbeClassifier.countryCode(fromCloudflareTrace: response.data) else {
-                    report = CheckReport(
+                    report = ServiceReport(
+                        kind: .google,
                         state: .unknown,
-                        detail: "Google 可访问；出口地区估算失败：\(ProbeError.invalidCountryResponse.localizedDescription)"
+                        detail: "Google 可访问；Cloudflare 辅助探测无法确认出口地区"
                     )
                     self.finish(report, completion: completion)
                     return
                 }
-                report = ProbeClassifier.report(forCountryCode: countryCode)
+                report = ProbeClassifier.googleReport(forCountryCode: countryCode)
             }
             self.finish(report, completion: completion)
         }
     }
 
+    private func checkAI(
+        spec: AIProbeSpec,
+        completion: @escaping @MainActor @Sendable (ServiceReport) -> Void
+    ) {
+        client.get(spec.edgeURL) { [weak self] result in
+            guard let self = self else { return }
+
+            let edge: CloudflareEdgeOutcome
+            switch result {
+            case .failure(let error):
+                self.finish(
+                    ServiceReport(
+                        kind: spec.kind,
+                        state: .red,
+                        detail: "\(spec.kind.displayName) 连接失败：\(error.localizedDescription)"
+                    ),
+                    completion: completion
+                )
+                return
+            case .success(let response):
+                edge = ProbeClassifier.classifyEdge(
+                    statusCode: response.statusCode,
+                    finalHost: response.finalHost,
+                    data: response.data,
+                    zoneDomain: spec.edgeDomain
+                )
+            }
+
+            switch edge {
+            case .blocked:
+                self.finish(ProbeClassifier.edgeBlockedReport(kind: spec.kind), completion: completion)
+            case .unexpected(let reason):
+                self.finish(
+                    ProbeClassifier.edgeUnexpectedReport(kind: spec.kind, reason: reason),
+                    completion: completion
+                )
+            case .reachable(let countryCode):
+                self.checkAIAPI(spec: spec, edgeCountry: countryCode, completion: completion)
+            }
+        }
+    }
+
+    private func checkAIAPI(
+        spec: AIProbeSpec,
+        edgeCountry: String?,
+        completion: @escaping @MainActor @Sendable (ServiceReport) -> Void
+    ) {
+        client.get(spec.apiURL) { [weak self] result in
+            guard let self = self else { return }
+
+            let api: APIRegionOutcome
+            switch result {
+            case .failure(let error):
+                api = .connectionFailed(error.localizedDescription)
+            case .success(let response):
+                api = ProbeClassifier.classifyAPI(
+                    statusCode: response.statusCode,
+                    finalHost: response.finalHost,
+                    data: response.data,
+                    probe: spec.apiProbe
+                )
+            }
+            self.finish(
+                ProbeClassifier.aiReport(kind: spec.kind, edgeCountry: edgeCountry, api: api),
+                completion: completion
+            )
+        }
+    }
+
     private func finish(
-        _ report: CheckReport,
-        completion: @escaping @MainActor @Sendable (CheckReport) -> Void
+        _ report: ServiceReport,
+        completion: @escaping @MainActor @Sendable (ServiceReport) -> Void
     ) {
         DispatchQueue.main.async {
             completion(report)
@@ -182,37 +345,31 @@ private final class GoogleChecker: @unchecked Sendable {
 private final class StatusBarController {
     private enum MenuTag {
         static let status = 100
-        static let lastCheck = 101
-        static let detail = 102
-        static let checkNow = 103
+        static let serviceBase = 200
+        static let serviceDetailBase = 210
+        static let lastCheck = 300
+        static let checkNow = 301
     }
 
     private static let checkInterval: TimeInterval = 300
+    private static let serviceOrder: [ServiceKind] = [.google, .chatgpt, .claude]
 
     private let statusItem: NSStatusItem
-    private let checker = GoogleChecker()
-    private let images: [CheckState: NSImage]
+    private let checker = MultiServiceChecker()
     private let timeFormatter: DateFormatter
     private var timer: DispatchSourceTimer?
-    private var lastReport = CheckReport.checking
+    private var reports: [ServiceKind: ServiceReport] = [:]
     private var lastCheckDate: Date?
-    private var isChecking = false
+    private var pendingChecks = 0
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        images = [
-            .green: createCircleImage(color: .systemGreen),
-            .yellow: createCircleImage(color: .systemYellow),
-            .red: createCircleImage(color: .systemRed),
-            .unknown: createCircleImage(color: .systemBlue),
-            .checking: createCircleImage(color: .systemGray)
-        ]
 
         timeFormatter = DateFormatter()
         timeFormatter.dateFormat = "HH:mm:ss"
 
         buildMenu()
-        updateStatus(.checking)
+        updateUI()
         performCheck()
         startTimer()
     }
@@ -221,18 +378,64 @@ private final class StatusBarController {
         timer?.cancel()
     }
 
+    private var aggregateState: CheckState {
+        let allReports = Self.serviceOrder.compactMap { reports[$0] }
+        return OverallStatus.state(of: allReports, isChecking: pendingChecks > 0)
+    }
+
+    private var orderedServiceStates: [CheckState] {
+        Self.serviceOrder.map { reports[$0]?.state ?? .checking }
+    }
+
+    private var accessibilityValue: String {
+        Self.serviceOrder.map { kind in
+            let state = reports[kind]?.state ?? .checking
+            return "\(kind.displayName) \(state.summary)"
+        }.joined(separator: "，")
+    }
+
+    private var aggregateLabel: String {
+        switch aggregateState {
+        case .green:
+            return "绿灯 - Google / ChatGPT / Claude 的检测信号均为美国出口"
+        case .yellow:
+            return "黄灯 - 至少一项未确认使用美国出口，详见下方"
+        case .checking:
+            return "检测中..."
+        case .red, .unknown:
+            return "检测中..."
+        }
+    }
+
+    private var tooltipText: String {
+        var lines = [aggregateLabel]
+        for kind in Self.serviceOrder {
+            let report = reports[kind] ?? .checking(kind)
+            lines.append(report.title)
+            lines.append("　" + report.detail)
+        }
+        return lines.joined(separator: "\n")
+    }
+
     private func buildMenu() {
         let menu = NSMenu()
 
-        let statusItem = NSMenuItem(title: "状态：检测中...", action: nil, keyEquivalent: "")
-        statusItem.isEnabled = false
-        statusItem.tag = MenuTag.status
-        menu.addItem(statusItem)
+        let statusRow = NSMenuItem(title: "状态：检测中...", action: nil, keyEquivalent: "")
+        statusRow.isEnabled = false
+        statusRow.tag = MenuTag.status
+        menu.addItem(statusRow)
 
-        let detailItem = NSMenuItem(title: "正在检测 Google 连通性", action: nil, keyEquivalent: "")
-        detailItem.isEnabled = false
-        detailItem.tag = MenuTag.detail
-        menu.addItem(detailItem)
+        for (index, kind) in Self.serviceOrder.enumerated() {
+            let titleRow = NSMenuItem(title: "\(kind.displayName)：检测中", action: nil, keyEquivalent: "")
+            titleRow.isEnabled = false
+            titleRow.tag = MenuTag.serviceBase + index
+            menu.addItem(titleRow)
+
+            let detailRow = NSMenuItem(title: "　检测中", action: nil, keyEquivalent: "")
+            detailRow.isEnabled = false
+            detailRow.tag = MenuTag.serviceDetailBase + index
+            menu.addItem(detailRow)
+        }
 
         let lastItem = NSMenuItem(title: "上次检测：—", action: nil, keyEquivalent: "")
         lastItem.isEnabled = false
@@ -250,13 +453,23 @@ private final class StatusBarController {
         checkNow.tag = MenuTag.checkNow
         menu.addItem(checkNow)
 
-        let openItem = NSMenuItem(
-            title: "在浏览器中打开 Google",
-            action: #selector(openGoogleClicked),
-            keyEquivalent: "o"
-        )
-        openItem.target = self
-        menu.addItem(openItem)
+        menu.addItem(.separator())
+
+        let links: [(title: String, key: String, url: String)] = [
+            ("在浏览器中打开 Google", "o", "https://www.google.com/"),
+            ("在浏览器中打开 ChatGPT", "g", "https://chatgpt.com/"),
+            ("在浏览器中打开 Claude", "l", "https://claude.ai/")
+        ]
+        for link in links {
+            let item = NSMenuItem(
+                title: link.title,
+                action: #selector(openLinkClicked(_:)),
+                keyEquivalent: link.key
+            )
+            item.target = self
+            item.representedObject = link.url
+            menu.addItem(item)
+        }
 
         menu.addItem(.separator())
 
@@ -268,15 +481,22 @@ private final class StatusBarController {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        self.statusItem.menu = menu
+        statusItem.menu = menu
         refreshMenuTitles()
     }
 
     private func refreshMenuTitles() {
         guard let menu = statusItem.menu else { return }
-        menu.item(withTag: MenuTag.status)?.title = "状态：\(lastReport.state.label)"
-        menu.item(withTag: MenuTag.detail)?.title = lastReport.detail
-        menu.item(withTag: MenuTag.checkNow)?.isEnabled = !isChecking
+
+        menu.item(withTag: MenuTag.status)?.title = "状态：\(aggregateLabel)"
+
+        for (index, kind) in Self.serviceOrder.enumerated() {
+            let report = reports[kind] ?? .checking(kind)
+            menu.item(withTag: MenuTag.serviceBase + index)?.title = report.title
+            menu.item(withTag: MenuTag.serviceDetailBase + index)?.title = "　" + report.detail
+        }
+
+        menu.item(withTag: MenuTag.checkNow)?.isEnabled = pendingChecks == 0
 
         if let lastCheckDate = lastCheckDate {
             menu.item(withTag: MenuTag.lastCheck)?.title = "上次检测：\(timeFormatter.string(from: lastCheckDate))"
@@ -289,8 +509,10 @@ private final class StatusBarController {
         performCheck()
     }
 
-    @objc private func openGoogleClicked() {
-        NSWorkspace.shared.open(URL(string: "https://www.google.com/")!)
+    @objc private func openLinkClicked(_ sender: NSMenuItem) {
+        guard let urlString = sender.representedObject as? String,
+              let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func quitClicked() {
@@ -314,28 +536,35 @@ private final class StatusBarController {
     }
 
     private func performCheck() {
-        guard !isChecking else { return }
-        isChecking = true
-        updateStatus(.checking)
+        guard pendingChecks == 0 else { return }
+        pendingChecks = Self.serviceOrder.count
+        for kind in Self.serviceOrder {
+            reports[kind] = .checking(kind)
+        }
+        updateUI()
 
-        checker.check { [weak self] report in
-            guard let self = self else { return }
-            self.isChecking = false
-            self.lastCheckDate = Date()
-            self.lastReport = report
-            self.updateStatus(report.state)
+        for kind in Self.serviceOrder {
+            checker.check(kind) { [weak self] report in
+                guard let self = self else { return }
+                self.reports[report.kind] = report
+                self.pendingChecks -= 1
+                if self.pendingChecks == 0 {
+                    self.lastCheckDate = Date()
+                }
+                self.updateUI()
+            }
         }
     }
 
-    private func updateStatus(_ state: CheckState) {
-        if state == .checking {
-            lastReport = .checking
-        }
+    private func updateUI() {
         if let button = statusItem.button {
-            button.image = images[state]
-            button.toolTip = "\(lastReport.state.label)\n\(lastReport.detail)"
-            button.setAccessibilityLabel(lastReport.state.label)
-            button.setAccessibilityHelp(lastReport.detail)
+            button.image = createServiceStatusImage(states: orderedServiceStates)
+            button.imageScaling = .scaleNone
+            let text = tooltipText
+            button.toolTip = text
+            button.setAccessibilityLabel("Google、ChatGPT、Claude 出口状态")
+            button.setAccessibilityValue(accessibilityValue)
+            button.setAccessibilityHelp(text)
         }
         refreshMenuTitles()
     }

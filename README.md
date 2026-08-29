@@ -1,36 +1,47 @@
 # GoogleStatusChecker
 
-A small macOS menu-bar app that checks whether Google is reachable and estimates the country of the current network exit.
+A small macOS menu-bar app that checks whether Google, ChatGPT (OpenAI), and Claude (Anthropic) are reachable through a United States network exit. A green overall light is shown only when every service is reachable and every available country signal is `US`.
 
-## Status lights
+## Three-service status icon
 
-| Light | Meaning |
+The menu bar shows three rounded vertical bars arranged as a compact square. Their fixed left-to-right order is:
+
+1. **Google**
+2. **ChatGPT**
+3. **Claude**
+
+Each bar changes independently, so one service can remain green while another is yellow, red, blue, or checking. The menu also shows an overall summary and a diagnostic message for every service:
+
+| Per-service symbol | Meaning |
 | :---: | :--- |
-| 🟢 Green | Google is reachable and the estimated exit country is the United States |
-| 🟡 Yellow | Google is reachable and the estimated exit country is not the United States |
-| 🔴 Red | Google is unreachable or the Google probe returned an unexpected response |
-| 🔵 Blue | Google is reachable, but the exit country could not be determined |
-| ⚪ Gray | A check is in progress |
+| 🟢 US exit | The service and its auxiliary API probe are reachable, and the country signal is `US` |
+| 🟡 Non-US / restricted | The country signal is not `US`, or the API rejects the request |
+| 🔴 Unavailable | Connection failed, or the IP was blocked/challenged by Cloudflare |
+| 🔵 Unknown | Reachable, but the exit country could not be confirmed; unknown is never treated as green |
 
-The menu shows a diagnostic message for the latest result. The app checks at launch, every five minutes, and whenever **Recheck now** is selected.
+The app checks at launch, every five minutes, and whenever **Recheck now** (`⌘R`) is selected. The three services are probed in parallel.
 
 ## How detection works
 
-The two signals are intentionally independent:
+1. **Google** — requests `https://www.google.com/generate_204` (must return HTTP 204 on a real `google.com` host), then reads the `loc` field of Cloudflare's [`/cdn-cgi/trace`](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/) endpoint as an auxiliary estimate of the machine's exit country. Green requires `US`; any other country is yellow, and missing data is unknown.
+2. **ChatGPT** — requests `https://chatgpt.com/cdn-cgi/trace` for a service-specific country signal, then calls `https://api.openai.com/v1/models` **without credentials** as an auxiliary reachability/region-rejection probe:
+   - `401` JSON error → the API entry point answered and did not reject this unauthenticated request
+   - `403` with `unsupported_country_region_territory` → OpenAI does not support the exit region
+   - `403` with a Cloudflare block/challenge page → the IP is flagged
+3. **Claude** — requests `https://claude.ai/cdn-cgi/trace` for its country signal, then calls `https://api.anthropic.com/v1/models` **without credentials** as an auxiliary probe (`401` `authentication_error` → API entry point reachable; `403` → region/permission restricted or blocked).
 
-1. **Google connectivity** — requests `https://www.google.com/generate_204`. A valid result must return HTTP 204 and finish on `google.com` or a real subdomain of it.
-2. **Exit-country estimate** — after Google succeeds, requests Cloudflare's public [`/cdn-cgi/trace`](https://developers.cloudflare.com/fundamentals/reference/cdn-cgi-endpoint/) endpoint and reads its two-letter `loc` field.
+For ChatGPT and Claude, an expected API authentication error is not enough for green: their `cdn-cgi/trace` country must also be `US`. A non-US or missing country signal always prevents an overall green light.
 
 [Google is moving country-specific Search domains toward `google.com`](https://blog.google/products-and-platforms/products/search/country-code-top-level-domains/), so the landing domain is no longer a reliable country signal. Missing or malformed region data is reported as **unknown** instead of being treated as US.
 
-The country result is an estimate of the path to Cloudflare. A domain-based proxy rule or split tunnel can route Google and Cloudflare differently; in that configuration, the displayed country may not describe Google's exact path.
+ChatGPT and Claude use trace endpoints on their own service domains, so domain-based proxy differences are visible. Google does not expose an equivalent stable country endpoint: its country is estimated through a separate Cloudflare request. If proxy rules route `google.com` and `cloudflare.com` differently, the Google country estimate cannot prove the exact Google path; the menu labels this signal as a Cloudflare-assisted estimate.
 
 ## Privacy and networking
 
 - The app sends no telemetry of its own and stores no history or preferences.
-- Requests use HTTPS, an ephemeral `URLSession`, no cookies, and no response cache.
-- A successful check contacts both Google and Cloudflare. Cloudflare can observe the request IP and the app's User-Agent, as with any direct HTTPS request.
-- A failed Google check does not contact Cloudflare.
+- Requests use HTTPS, an ephemeral `URLSession`, no cookies, and no response cache. No API keys are used or required.
+- A full check contacts `google.com`, `cloudflare.com`, `chatgpt.com`, `api.openai.com`, `claude.ai`, and `api.anthropic.com`. These services can observe the request IP and the app's User-Agent, as with any direct HTTPS request.
+- A failed probe does not trigger its dependent follow-up request.
 
 ## Requirements
 
@@ -66,9 +77,9 @@ The app runs only in the menu bar and does not appear in the Dock.
 
 | Menu item | Action |
 | :--- | :--- |
-| Status / diagnostic / last check | Shows the current result and reason |
+| Status | Overall light and per-service state + diagnostic for each |
 | Recheck now (`⌘R`) | Runs a check immediately |
-| Open Google (`⌘O`) | Opens Google in the default browser |
+| Open Google (`⌘O`) / ChatGPT (`⌘G`) / Claude (`⌘L`) | Opens the service in the default browser |
 | Quit (`⌘Q`) | Quits the app |
 
 To launch it at login, add `GoogleStatusChecker.app` in **System Settings → General → Login Items & Extensions**.
@@ -94,7 +105,7 @@ For public distribution, use an Apple Developer ID certificate and notarization 
 
 ```text
 GoogleStatusChecker/
-├── CheckerCore.swift             # Pure host, response, and country classification
+├── CheckerCore.swift             # Pure host, response, region, and aggregation classifiers
 ├── main.swift                    # Networking and AppKit menu-bar UI
 ├── Tests/CheckerCoreTests.swift  # Offline classifier tests
 ├── Info.plist                    # App bundle metadata
