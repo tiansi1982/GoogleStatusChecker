@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Upper bound applied to every probe response body before parsing.
@@ -31,7 +32,7 @@ enum CheckState: Hashable, Sendable {
     }
 }
 
-enum ServiceKind: String, CaseIterable, Sendable {
+enum ServiceKind: String, CaseIterable, Codable, Sendable {
     case google
     case chatgpt
     case claude
@@ -43,6 +44,14 @@ enum ServiceKind: String, CaseIterable, Sendable {
         case .claude: return "Claude"
         }
     }
+
+    var agentName: String {
+        switch self {
+        case .google: return "Antigravity"
+        case .chatgpt: return "Codex"
+        case .claude: return "Claude Code"
+        }
+    }
 }
 
 struct ServiceReport: Equatable, Sendable {
@@ -50,10 +59,15 @@ struct ServiceReport: Equatable, Sendable {
     let state: CheckState
     let detail: String
 
-    init(kind: ServiceKind, state: CheckState, detail: String) {
+    let exitIP: String?
+    let endpoints: [AgentProbeResult]
+
+    init(kind: ServiceKind, state: CheckState, detail: String, exitIP: String? = nil, endpoints: [AgentProbeResult] = []) {
         self.kind = kind
         self.state = state
         self.detail = detail
+        self.endpoints = endpoints
+        self.exitIP = exitIP
     }
 
     static func checking(_ kind: ServiceKind) -> ServiceReport {
@@ -100,8 +114,44 @@ struct APIProbe: Sendable {
     static let anthropic = APIProbe(zoneDomain: "anthropic.com", regionErrorCode: nil)
 }
 
+struct CloudflareTrace: Equatable, Sendable {
+    let countryCode: String?
+    let ipAddress: String?
+
+    init(data: Data) {
+        guard data.count <= maxProbeBodyBytes, let text = String(data: data, encoding: .utf8) else {
+            countryCode = nil
+            ipAddress = nil
+            return
+        }
+        let lines = text.split(whereSeparator: \.isNewline)
+        func value(for key: String) -> String? {
+            for line in lines {
+                let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                if parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == key {
+                    return parts[1].trimmingCharacters(in: .whitespaces)
+                }
+            }
+            return nil
+        }
+        let code = value(for: "loc")?.uppercased() ?? ""
+        countryCode = code.utf8.count == 2 && code.utf8.allSatisfy { (65...90).contains($0) } ? code : nil
+        ipAddress = value(for: "ip").flatMap(Self.normalizeIP)
+    }
+
+    private static func normalizeIP(_ value: String) -> String? {
+        guard !value.utf8.contains(0) else { return nil }
+        let family = value.contains(":") ? AF_INET6 : AF_INET
+        var address = in6_addr() // Large enough for either address family.
+        guard inet_pton(family, value, &address) == 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(family, &address, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+        return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    }
+}
+
 enum CloudflareEdgeOutcome: Equatable, Sendable {
-    case reachable(countryCode: String?)
+    case reachable(CloudflareTrace)
     case blocked
     case unexpected(String)
 }
@@ -144,30 +194,6 @@ enum ProbeClassifier {
         return HostValidation.host(finalHost, belongsTo: "google.com")
     }
 
-    static func countryCode(fromCloudflareTrace data: Data) -> String? {
-        guard data.count <= maxProbeBodyBytes,
-              let text = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-
-        for rawLine in text.split(whereSeparator: { $0.isNewline }) {
-            let parts = rawLine.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2,
-                  parts[0].trimmingCharacters(in: .whitespacesAndNewlines) == "loc" else {
-                continue
-            }
-
-            let code = parts[1].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            guard code.count == 2, code.unicodeScalars.allSatisfy({ scalar in
-                scalar.value >= 65 && scalar.value <= 90
-            }) else {
-                return nil
-            }
-            return code
-        }
-        return nil
-    }
-
     /// Recognizes Cloudflare WAF block and managed-challenge pages. Only HTTP error
     /// responses are considered; markers are matched case-insensitively.
     static func isCloudflareBlockPage(statusCode: Int, data: Data) -> Bool {
@@ -205,7 +231,7 @@ enum ProbeClassifier {
         guard let host = finalHost, HostValidation.host(host, belongsTo: zoneDomain) else {
             return .unexpected("请求落到了非预期域名 \(finalHost ?? "未知")")
         }
-        return .reachable(countryCode: countryCode(fromCloudflareTrace: data))
+        return .reachable(CloudflareTrace(data: data))
     }
 
     /// Classifies an unauthenticated API call used as a region/availability probe:
@@ -262,26 +288,29 @@ enum ProbeClassifier {
 
     // MARK: - Report builders
 
-    static func googleReport(forCountryCode countryCode: String) -> ServiceReport {
-        let normalized = countryCode.uppercased()
-        if normalized == "XX" {
+    static func googleReport(forCountryCode countryCode: String?, exitIP: String? = nil) -> ServiceReport {
+        let normalized = countryCode?.uppercased()
+        guard let normalized, normalized != "XX" else {
             return ServiceReport(
                 kind: .google,
                 state: .unknown,
-                detail: "Google 可访问；Cloudflare 辅助探测无法确认出口地区"
+                detail: "Google 可访问；Cloudflare 辅助探测无法确认出口地区",
+                exitIP: exitIP
             )
         }
         if normalized == "US" {
             return ServiceReport(
                 kind: .google,
                 state: .green,
-                detail: "Google 可访问；Cloudflare 辅助探测出口：美国（US）"
+                detail: "Google 可访问；Cloudflare 辅助探测出口：美国（US）",
+                exitIP: exitIP
             )
         }
         return ServiceReport(
             kind: .google,
             state: .yellow,
-            detail: "Google 可访问；Cloudflare 辅助探测出口不是美国：\(normalized)"
+            detail: "Google 可访问；Cloudflare 辅助探测出口不是美国：\(normalized)",
+            exitIP: exitIP
         )
     }
 
@@ -304,54 +333,30 @@ enum ProbeClassifier {
     static func aiReport(
         kind: ServiceKind,
         edgeCountry: String?,
-        api: APIRegionOutcome
+        api: APIRegionOutcome,
+        exitIP: String? = nil
     ) -> ServiceReport {
         let region = regionDisplay(edgeCountry)
+        func report(_ state: CheckState, _ detail: String) -> ServiceReport {
+            ServiceReport(kind: kind, state: state, detail: detail, exitIP: exitIP)
+        }
         switch api {
         case .available:
             guard region != "未知" else {
-                return ServiceReport(
-                    kind: kind,
-                    state: .unknown,
-                    detail: "\(kind.displayName) 服务与 API 入口可达，但无法确认出口地区"
-                )
+                return report(.unknown, "\(kind.displayName) 服务与 API 入口可达，但无法确认出口地区")
             }
             guard region == "US" else {
-                return ServiceReport(
-                    kind: kind,
-                    state: .yellow,
-                    detail: "\(kind.displayName) 服务与 API 入口可达，但出口地区不是美国：\(region)"
-                )
+                return report(.yellow, "\(kind.displayName) 服务与 API 入口可达，但出口地区不是美国：\(region)")
             }
-            return ServiceReport(
-                kind: kind,
-                state: .green,
-                detail: "\(kind.displayName) 服务与 API 入口可达；出口地区：美国（US）"
-            )
+            return report(.green, "\(kind.displayName) 服务与 API 入口可达；出口地区：美国（US）")
         case .regionRestricted(let reason):
-            return ServiceReport(
-                kind: kind,
-                state: .yellow,
-                detail: "\(kind.displayName) 服务入口可达，但\(reason)；出口地区：\(region)"
-            )
+            return report(.yellow, "\(kind.displayName) 服务入口可达，但\(reason)；出口地区：\(region)")
         case .blocked:
-            return ServiceReport(
-                kind: kind,
-                state: .red,
-                detail: "\(kind.displayName) 服务入口可达，但 API 被 Cloudflare 拦截（IP 疑似被风控）"
-            )
+            return report(.red, "\(kind.displayName) 服务入口可达，但 API 被 Cloudflare 拦截（IP 疑似被风控）")
         case .connectionFailed(let error):
-            return ServiceReport(
-                kind: kind,
-                state: .red,
-                detail: "\(kind.displayName) 服务入口可达，但 API 连接失败：\(error)；出口地区：\(region)"
-            )
+            return report(.red, "\(kind.displayName) 服务入口可达，但 API 连接失败：\(error)；出口地区：\(region)")
         case .unexpected(let reason):
-            return ServiceReport(
-                kind: kind,
-                state: .unknown,
-                detail: "\(kind.displayName) 服务入口可达；API 响应异常：\(reason)"
-            )
+            return report(.unknown, "\(kind.displayName) 服务入口可达；API 响应异常：\(reason)")
         }
     }
 }

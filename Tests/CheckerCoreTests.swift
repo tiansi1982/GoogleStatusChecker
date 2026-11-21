@@ -32,6 +32,10 @@ struct CheckerCoreTests {
         try testAnthropicAPIClassification()
         try testAIReportBuilding()
         try testOverallAggregation()
+        try testExitIPObservations()
+        try testExitIPHistory()
+        try testClaudeIPFamilies()
+        try testAgentProbes()
         print("CheckerCoreTests: \(testCount) assertions passed")
     }
 
@@ -57,13 +61,13 @@ struct CheckerCoreTests {
         let malformedTrace = Data("loc=USA\n".utf8)
         let missingTrace = Data("colo=SJC\n".utf8)
 
-        try expectEqual(ProbeClassifier.countryCode(fromCloudflareTrace: usTrace), "US")
-        try expectEqual(ProbeClassifier.countryCode(fromCloudflareTrace: lowercaseTrace), "JP")
-        try expectEqual(ProbeClassifier.countryCode(fromCloudflareTrace: malformedTrace), nil)
-        try expectEqual(ProbeClassifier.countryCode(fromCloudflareTrace: missingTrace), nil)
-        try expectEqual(ProbeClassifier.countryCode(fromCloudflareTrace: Data([0xFF])), nil)
+        try expectEqual(CloudflareTrace(data: usTrace).countryCode, "US")
+        try expectEqual(CloudflareTrace(data: lowercaseTrace).countryCode, "JP")
+        try expectEqual(CloudflareTrace(data: malformedTrace).countryCode, nil)
+        try expectEqual(CloudflareTrace(data: missingTrace).countryCode, nil)
+        try expectEqual(CloudflareTrace(data: Data([0xFF])).countryCode, nil)
         try expectEqual(
-            ProbeClassifier.countryCode(fromCloudflareTrace: Data(repeating: 65, count: maxProbeBodyBytes + 1)),
+            CloudflareTrace(data: Data(repeating: 65, count: maxProbeBodyBytes + 1)).countryCode,
             nil
         )
     }
@@ -95,13 +99,13 @@ struct CheckerCoreTests {
             ProbeClassifier.classifyEdge(
                 statusCode: 200, finalHost: "chatgpt.com", data: usTrace, zoneDomain: "chatgpt.com"
             ),
-            CloudflareEdgeOutcome.reachable(countryCode: "US")
+            CloudflareEdgeOutcome.reachable(CloudflareTrace(data: usTrace))
         )
         try expectEqual(
             ProbeClassifier.classifyEdge(
                 statusCode: 200, finalHost: "claude.ai", data: noLocTrace, zoneDomain: "claude.ai"
             ),
-            CloudflareEdgeOutcome.reachable(countryCode: nil)
+            CloudflareEdgeOutcome.reachable(CloudflareTrace(data: noLocTrace))
         )
         try expectEqual(
             ProbeClassifier.classifyEdge(
@@ -302,6 +306,170 @@ struct CheckerCoreTests {
 
         try expectEqual(OverallStatus.state(of: allGreen, isChecking: true), .checking)
         try expectEqual(OverallStatus.state(of: [report(.google, .green)], isChecking: false), .checking)
+    }
+
+    private static func testExitIPObservations() throws {
+        func trace(_ text: String) -> CloudflareTrace { CloudflareTrace(data: Data(text.utf8)) }
+        let ipv6 = trace("loc=US\nip= 2001:0DB8:0:0:0:0:0:1 \n")
+        try expectEqual(ipv6.ipAddress, "2001:db8::1")
+        try expectEqual(ipv6.ipAddress, trace("ip=2001:db8::1").ipAddress)
+        try expectEqual(trace("ip=203.0.113.7\r\nloc=??").ipAddress, "203.0.113.7")
+        for bad in ["", "256.9.2.1", "garbage", "127.0.0.1\u{0}suffix", "2001:db8:::1"] {
+            try expectEqual(trace("loc=US\nip=" + bad).ipAddress, nil)
+        }
+        try expectEqual(trace("ip=192.0.2.1\n" + String(repeating: "x", count: maxProbeBodyBytes)).ipAddress, nil)
+        try expectEqual(ProbeClassifier.googleReport(forCountryCode: nil, exitIP: ipv6.ipAddress).exitIP, ipv6.ipAddress)
+        try expectEqual(
+            ProbeClassifier.aiReport(kind: .claude, edgeCountry: nil, api: .connectionFailed("超时"),
+                                     exitIP: ipv6.ipAddress).exitIP, ipv6.ipAddress
+        )
+    }
+
+    private static func testExitIPHistory() throws {
+        let start = Date(timeIntervalSince1970: 12345)
+        var history = ExitIPHistory()
+        func observe(_ kind: ServiceKind, _ address: String?, _ seconds: Int) {
+            let report = ServiceReport(kind: kind, state: .unknown, detail: "", exitIP: address)
+            history.observe(report, at: start.addingTimeInterval(Double(seconds)))
+        }
+
+        observe(.google, "192.0.2.1", 0)
+        observe(.claude, "192.0.2.2", 0)
+        observe(.google, nil, 1)
+        try expectEqual(history.records[.google]?.lastSeen, start)
+        observe(.google, "192.0.2.1", 2)
+        try expectEqual(history.records[.google]?.changes, [])
+        try expectEqual(history.unreadServices, [])
+        try expectEqual(history.records[.google]?.lastSeen, start.addingTimeInterval(2))
+
+        observe(.google, "192.0.2.2", 3)
+        observe(.google, nil, 4)
+        let change = ExitIPChange(date: start.addingTimeInterval(3), previous: "192.0.2.1", current: "192.0.2.2")
+        try expectEqual(history.records[.google]?.changes, [change])
+        try expectEqual(history.unreadServices, [.google])
+        observe(.claude, "2001:db8::1", 5)
+        try expectEqual(history.unreadServices, [.google])
+        observe(.claude, "2001:db8::2", 6)
+        try expectEqual(history.unreadServices, [.google, .claude])
+
+        // Use a disposable suite to keep test observations out of the app's preferences.
+        let suite = "CheckerCoreTests." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        history.save(to: defaults)
+        history = ExitIPHistory.load(from: defaults)
+        try expectEqual(history.records[.google]?.changes, [change])
+        try expectEqual(history.unreadServices, [.google, .claude])
+        history.markAllRead()
+        history.save(to: defaults)
+        history = ExitIPHistory.load(from: defaults)
+        try expectEqual(history.unreadServices, [])
+        try expectEqual(history.records[.google]?.changes, [change])
+        observe(.google, "192.0.2.1", 6)
+        try expectEqual(history.unreadServices, [.google])
+        try expectEqual(history.records[.google]?.changes.first?.previous, "192.0.2.2")
+        for i in 1...60 { observe(.claude, "203.0.113.\(i)", i + 6) }
+        try expectEqual(history.records[.claude]?.changes.count, ExitIPHistory.changesPerService)
+        try expectEqual(history.records[.claude]?.changes.first?.current, "203.0.113.60")
+        try expectEqual(history.records[.google]?.changes.count, 2)
+    }
+
+    private static func testClaudeIPFamilies() throws {
+        let suite = "ClaudeIPFamilies." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let a = "192.0.2.1", b = "192.0.2.2", x = "2001:db8::1", y = "2001:db8::2"
+        // The oldest retained event is the only evidence of the IPv4 baseline.
+        let legacy = #"{"records":["claude",{"address":"2001:db8::1","lastSeen":1,"hasUnreadChange":true,"changes":[{"date":1,"previous":"192.0.2.1","current":"2001:db8::1"}]}]}"#
+        defaults.set(Data(legacy.utf8), forKey: "exitIPHistory.v1")
+        var history = ExitIPHistory.load(from: defaults)
+        func observe(_ ip: String?) {
+            history.observe(ServiceReport(kind: .claude, state: .green, detail: "", exitIP: ip), at: Date())
+        }
+        try expectEqual(history.records[.claude]?.familyBaselines?.ipv4, a)
+        try expectEqual(history.records[.claude]?.familyBaselines?.ipv6, x)
+        try expectEqual(history.unreadServices, [])
+        observe(a)
+        observe(x)
+        observe(nil)
+        observe(x)
+        try expectEqual(history.records[.claude]?.changes.count, 3)
+        try expectEqual(history.records[.claude]?.changes.first?.claudeDescription, "切换至 IPv6")
+        try expectEqual(history.unreadServices, [])
+        observe(b)
+        let change = history.records[.claude]?.changes.first
+        try expectEqual(change?.previous, x)
+        try expectEqual(change?.previousInFamily, a)
+        try expectEqual(change?.claudeDescription, "IPv4 出口变更")
+        observe(x)
+        try expectEqual(history.unreadServices, [.claude])
+        history.markAllRead()
+        observe(b)
+        try expectEqual(history.unreadServices, [])
+        observe(y)
+        try expectEqual(history.records[.claude]?.changes.first?.previousInFamily, x)
+        try expectEqual(history.unreadServices, [.claude])
+        for i in 1...55 { observe("192.0.2.\(i)") }
+        history.markAllRead()
+        history.save(to: defaults)
+        history = ExitIPHistory.load(from: defaults)
+        observe(y)
+        try expectEqual(history.unreadServices, [])
+        observe(x)
+        try expectEqual(history.unreadServices, [.claude])
+        try expectEqual(history.records[.claude]?.changes.first?.previousInFamily, y)
+    }
+
+    private static func testAgentProbes() throws {
+        let codex = AgentEndpoint.endpoints(for: .chatgpt)
+        let claude = AgentEndpoint.endpoints(for: .claude)
+        let google = AgentEndpoint.endpoints(for: .google)
+        let service = codex.first { $0.url.path == "/backend-api/codex/responses" }!
+        let token = claude.first { $0.contract == .oauthToken }!
+        let login = claude.first { $0.contract == .claudeSignIn }!
+        let host = google.first { $0.url.host == "aicode.googleapis.com" }!
+        let cdn = codex.first { !$0.required }!
+        func check(_ endpoint: AgentEndpoint, _ status: Int, _ body: String = "", redirect: String? = nil,
+                   challenged: Bool = false) -> AgentProbeResult {
+            .classify(endpoint, status: status, host: endpoint.url.host, data: Data(body.utf8),
+                      location: redirect.flatMap { URL(string: $0) }, challenged: challenged)
+        }
+        try expect(codex.contains { $0.url.path == "/v1/responses" && $0.required })
+        try expect(claude.contains { $0.url.path == "/v1/messages" && $0.required })
+        try expect(google.contains { $0.url.host == "daily-cloudcode-pa.googleapis.com" && $0.required })
+        for targets in [codex, claude, google] {
+            try expectEqual(Set(targets.map(\.url)).count, targets.count)
+            try expect(targets.allSatisfy { $0.url.scheme == "https" })
+        }
+        let ok = check(service, 401, #"{"detail":"Unauthorized"}"#)
+        try expectEqual(ok.state, .green)
+        try expectEqual(check(service, 401, "<html>Proxy login</html>").state, .unknown)
+        try expectEqual(check(service, 404).state, .unknown)
+        try expectEqual(check(service, 200, #"{"detail":"Unauthorized"}"#).state, .unknown)
+        try expectEqual(check(service, 403, #"{"error":{"code":"unsupported_country_region_territory"}}"#).state, .yellow)
+        try expectEqual(check(token, 400, #"{"error":{"type":"invalid_request_error"}}"#).state, .green)
+        try expectEqual(check(token, 400, #"{"error":"unrelated_error"}"#).state, .unknown)
+        try expectEqual(check(login, 307, redirect: "https://claude.ai/oauth/authorize").state, .green)
+        try expectEqual(check(login, 307, redirect: "https://other.example/oauth/authorize").state, .unknown)
+        try expectEqual(check(host, 404).state, .green)
+        try expectEqual(check(host, 426).state, .green)
+        let release = claude.first { $0.contract == .releaseFile }!
+        try expectEqual(check(release, 404).state, .unknown)
+        try expectEqual(check(release, 200).state, .green)
+        try expectEqual(check(host, 403, challenged: true).state, .red)
+        try expectEqual(check(host, 502).state, .red)
+        let base = ServiceReport(kind: .chatgpt, state: .green, detail: "US", exitIP: "192.0.2.7")
+        let auxiliaryFailure = check(cdn, 503)
+        let report = base.including([ok, auxiliaryFailure])
+        try expectEqual(report.state, .green)
+        try expectEqual(report.endpoints.last, auxiliaryFailure)
+        let failed = base.including([check(service, 502)])
+        try expectEqual(failed.state, .red)
+        try expectEqual(failed.exitIP, base.exitIP)
+        try expect(failed.detail.contains(service.purpose))
+        try expectEqual(base.including([check(service, 401, "bad")]).state, .unknown)
+        let restricted = ServiceReport(kind: .claude, state: .yellow, detail: "JP")
+        try expectEqual(restricted.including([ok]).state, .yellow)
     }
 
     // MARK: - Helpers

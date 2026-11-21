@@ -1,0 +1,46 @@
+{
+  "google": [
+    {"purpose": "Google 登录", "address": "accounts.google.com/.well-known/openid-configuration", "contract": "discovery", "required": true},
+    {"purpose": "OAuth 令牌", "address": "oauth2.googleapis.com/token", "contract": "oauthToken", "required": true},
+    {"purpose": "Antigravity 模型服务", "address": "daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", "contract": "protectedAPI", "required": true},
+    {"purpose": "Antigravity 客户端配置", "address": "aicode.googleapis.com", "contract": "httpsHost", "required": true},
+    {"purpose": "Cloud Code", "address": "cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", "contract": "protectedAPI", "required": false},
+    {"purpose": "Gemini API 密钥模式", "address": "generativelanguage.googleapis.com", "contract": "httpsHost", "required": false},
+    {"purpose": "企业编排", "address": "businessaicode.googleapis.com", "contract": "httpsHost", "required": false},
+    {"purpose": "企业模型", "address": "aiplatform.googleapis.com", "contract": "httpsHost", "required": false},
+    {"purpose": "企业检索", "address": "discoveryengine.googleapis.com", "contract": "httpsHost", "required": false}
+  ],
+  "chatgpt": [
+    {"purpose": "Codex 登录", "address": "auth.openai.com/.well-known/openid-configuration", "contract": "discovery", "required": true},
+    {"purpose": "OAuth 令牌", "address": "auth.openai.com/oauth/token", "contract": "oauthToken", "required": true},
+    {"purpose": "Codex 订阅推理", "address": "chatgpt.com/backend-api/codex/responses", "contract": "protectedAPI", "required": true},
+    {"purpose": "API 密钥推理", "address": "api.openai.com/v1/responses", "contract": "protectedAPI", "required": true},
+    {"purpose": "静态资源", "address": "cdn.oaistatic.com", "contract": "httpsHost", "required": false},
+    {"purpose": "文件", "address": "files.oaiusercontent.com", "contract": "httpsHost", "required": false},
+    {"purpose": "登录验证", "address": "challenges.cloudflare.com", "contract": "httpsHost", "required": false},
+    {"purpose": "登录验证", "address": "client-api.arkoselabs.com", "contract": "httpsHost", "required": false},
+    {"purpose": "身份服务", "address": "auth0.com", "contract": "httpsHost", "required": false},
+    {"purpose": "入口别名", "address": "ai.com", "contract": "httpsHost", "required": false},
+    {"purpose": "入口别名", "address": "chat.com", "contract": "httpsHost", "required": false},
+    {"purpose": "功能开关", "address": "featuregates.org", "contract": "httpsHost", "required": false},
+    {"purpose": "事件", "address": "events.statsigapi.net", "contract": "httpsHost", "required": false},
+    {"purpose": "诊断", "address": "sentry.io", "contract": "httpsHost", "required": false},
+    {"purpose": "支付", "address": "stripe.com", "contract": "httpsHost", "required": false},
+    {"purpose": "Sora", "address": "sora.com", "contract": "httpsHost", "required": false},
+    {"purpose": "CDN", "address": "chat.openai.com.cdn.cloudflare.net", "contract": "httpsHost", "required": false},
+    {"purpose": "CDN", "address": "openaiapi-site.azureedge.net", "contract": "httpsHost", "required": false},
+    {"purpose": "CDN", "address": "openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net", "contract": "httpsHost", "required": false},
+    {"purpose": "存储", "address": "openaicomproductionae4b.blob.core.windows.net", "contract": "httpsHost", "required": false},
+    {"purpose": "存储", "address": "production-openaicom-storage.azureedge.net", "contract": "httpsHost", "required": false}
+  ],
+  "claude": [
+    {"purpose": "Claude Code 登录入口", "address": "claude.com/cai/oauth/authorize", "contract": "claudeSignIn", "required": true},
+    {"purpose": "OAuth 客户端", "address": "claude.ai/oauth/claude-code-client-metadata", "contract": "claudeMetadata", "required": true},
+    {"purpose": "OAuth 令牌", "address": "platform.claude.com/v1/oauth/token", "contract": "oauthToken", "required": true},
+    {"purpose": "Messages 推理", "address": "api.anthropic.com/v1/messages", "contract": "protectedAPI", "required": true},
+    {"purpose": "组织单点登录", "address": "sso.claude.com", "contract": "httpsHost", "required": false},
+    {"purpose": "MCP 连接器", "address": "mcp-proxy.anthropic.com", "contract": "httpsHost", "required": false},
+    {"purpose": "安装与更新", "address": "downloads.claude.ai/claude-code-releases/latest", "contract": "releaseFile", "required": false},
+    {"purpose": "Chrome 扩展桥接", "address": "bridge.claudeusercontent.com", "contract": "httpsHost", "required": false}
+  ]
+}

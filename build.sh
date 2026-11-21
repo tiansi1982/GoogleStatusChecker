@@ -51,7 +51,7 @@ for arch in $ARCHS; do
         -target "$triple" \
         -framework Cocoa \
         -o "$binary" \
-        CheckerCore.swift main.swift
+        CheckerCore.swift AgentProbes.swift ExitIPHistory.swift IPReportWindow.swift main.swift
     BINARIES+=("$binary")
 done
 
@@ -63,6 +63,7 @@ else
 fi
 
 cp Info.plist "${STAGED_CONTENTS}/Info.plist"
+cp Resources/AgentEndpoints.json "$STAGED_RESOURCES/"
 cp AppIcon.icns "${STAGED_RESOURCES}/AppIcon.icns"
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion ${MIN_OS}" "${STAGED_CONTENTS}/Info.plist"
 plutil -lint "${STAGED_CONTENTS}/Info.plist" >/dev/null
